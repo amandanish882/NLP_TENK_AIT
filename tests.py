@@ -1,202 +1,227 @@
-import collections
-from collections import OrderedDict
-import copy
-import pandas as pd
+"""
+Unit tests for the NLP 10-K alpha factor project.
+
+Run with: pytest tests.py -v
+"""
+
 import numpy as np
-from datetime import date, timedelta
+import pandas as pd
+import pytest
+
+from sec_data import extract_documents, get_document_type
+from text_processing import (
+    remove_html_tags, clean_text, tokenize,
+    lemmatize_words, remove_stopwords,
+)
+from sentiment import get_bag_of_words, get_tfidf
+from similarity import compute_jaccard_similarity, compute_cosine_similarity
+from factor_evaluation import compute_sharpe_ratio
 
 
-pd.options.display.float_format = '{:.8f}'.format
+# ---------------------------------------------------------------------------
+# sec_data tests
+# ---------------------------------------------------------------------------
+
+class TestExtractDocuments:
+    def test_extracts_correct_count(self):
+        text = "<DOCUMENT>doc one</DOCUMENT><DOCUMENT>doc two</DOCUMENT>"
+        docs = extract_documents(text)
+        assert len(docs) == 2
+
+    def test_extracts_content_without_tags(self):
+        text = "<DOCUMENT>hello world</DOCUMENT>"
+        docs = extract_documents(text)
+        assert docs[0] == "hello world"
+        assert "<DOCUMENT>" not in docs[0]
+
+    def test_empty_input(self):
+        assert extract_documents("no documents here") == []
+
+    def test_multiple_documents_correct_content(self):
+        text = "<DOCUMENT>first</DOCUMENT>noise<DOCUMENT>second</DOCUMENT>"
+        docs = extract_documents(text)
+        assert docs[0] == "first"
+        assert docs[1] == "second"
 
 
-def _generate_output_error_msg(fn_name, fn_inputs, fn_outputs, fn_expected_outputs):
-    formatted_inputs = []
-    formatted_outputs = []
-    formatted_expected_outputs = []
+class TestGetDocumentType:
+    def test_returns_lowercase_type(self):
+        doc = "<TYPE>10-K\n<SEQUENCE>1\nsome content"
+        assert get_document_type(doc) == "10-k"
 
-    for input_name, input_value in fn_inputs.items():
-        formatted_outputs.append('INPUT {}:\n{}\n'.format(
-            input_name, str(input_value)))
-    for output_name, output_value in fn_outputs.items():
-        formatted_outputs.append('OUTPUT {}:\n{}\n'.format(
-            output_name, str(output_value)))
-    for expected_output_name, expected_output_value in fn_expected_outputs.items():
-        formatted_expected_outputs.append('EXPECTED OUTPUT FOR {}:\n{}\n'.format(
-            expected_output_name, str(expected_output_value)))
+    def test_handles_exhibit(self):
+        doc = "<TYPE>EX-21.1\n<SEQUENCE>3"
+        assert get_document_type(doc) == "ex-21.1"
 
-    return 'Wrong value for {}.\n' \
-           '{}\n' \
-           '{}\n' \
-           '{}' \
-        .format(
-            fn_name,
-            '\n'.join(formatted_inputs),
-            '\n'.join(formatted_outputs),
-            '\n'.join(formatted_expected_outputs))
+    def test_empty_doc(self):
+        assert get_document_type("no type tag here") == ""
 
 
-def _is_equal(x, y):
-    is_equal = False
+# ---------------------------------------------------------------------------
+# text_processing tests
+# ---------------------------------------------------------------------------
 
-    if isinstance(x, pd.DataFrame) or isinstance(y, pd.Series):
-        is_equal = x.equals(y)
-    elif isinstance(x, np.ndarray):
-        is_equal = np.array_equal(x, y)
-    elif isinstance(x, list):
-        if len(x) == len(y):
-            for x_item, y_item in zip(x, y):
-                if not _is_equal(x_item, y_item):
-                    break
-            else:
-                is_equal = True
-    else:
-        is_equal = x == y
+class TestRemoveHtmlTags:
+    def test_strips_html(self):
+        html = "<p>Hello <b>world</b></p>"
+        assert remove_html_tags(html) == "Hello world"
 
-    return is_equal
+    def test_plain_text_unchanged(self):
+        text = "no html here"
+        assert remove_html_tags(text) == "no html here"
 
 
-def project_test(func):
-    def func_wrapper(*args):
-        result = func(*args)
-        print('Tests Passed')
-        return result
-
-    return func_wrapper
+class TestCleanText:
+    def test_lowercases_and_strips_html(self):
+        text = "<P>Hello WORLD</P>"
+        assert clean_text(text) == "hello world"
 
 
-def generate_random_tickers(n_tickers=None):
-    min_ticker_len = 3
-    max_ticker_len = 5
-    tickers = []
+class TestTokenize:
+    def test_extracts_words(self):
+        assert tokenize("hello, world! 123") == ["hello", "world", "123"]
 
-    if not n_tickers:
-        n_tickers = np.random.randint(8, 14)
-
-    ticker_symbol_random = np.random.randint(ord('A'), ord('Z')+1, (n_tickers, max_ticker_len))
-    ticker_symbol_lengths = np.random.randint(min_ticker_len, max_ticker_len, n_tickers)
-    for ticker_symbol_rand, ticker_symbol_length in zip(ticker_symbol_random, ticker_symbol_lengths):
-        ticker_symbol = ''.join([chr(c_id) for c_id in ticker_symbol_rand[:ticker_symbol_length]])
-        tickers.append(ticker_symbol)
-
-    return tickers
+    def test_empty_string(self):
+        assert tokenize("") == []
 
 
-def generate_random_dates(n_days=None):
-    if not n_days:
-        n_days = np.random.randint(14, 20)
+class TestLemmatizeWords:
+    def test_lemmatizes_verbs(self):
+        words = ["running", "walked", "computing"]
+        result = lemmatize_words(words)
+        assert "run" in result
+        assert "walk" in result
+        assert "compute" in result
 
-    start_year = np.random.randint(1999, 2017)
-    start_month = np.random.randint(1, 12)
-    start_day = np.random.randint(1, 29)
-    start_date = date(start_year, start_month, start_day)
+    def test_nouns_unchanged(self):
+        words = ["cat", "dog"]
+        result = lemmatize_words(words)
+        assert result == ["cat", "dog"]
 
-    dates = []
-    for i in range(n_days):
-        dates.append(start_date + timedelta(days=i))
-
-    return dates
-
-
-def assert_structure(received_obj, expected_obj, obj_name):
-    assert isinstance(received_obj, type(expected_obj)), \
-        'Wrong type for output {}. Got {}, expected {}'.format(obj_name, type(received_obj), type(expected_obj))
-
-    if hasattr(expected_obj, 'shape'):
-        assert received_obj.shape == expected_obj.shape, \
-            'Wrong shape for output {}. Got {}, expected {}'.format(obj_name, received_obj.shape, expected_obj.shape)
-    elif hasattr(expected_obj, '__len__'):
-        assert len(received_obj) == len(expected_obj), \
-            'Wrong len for output {}. Got {}, expected {}'.format(obj_name, len(received_obj), len(expected_obj))
-
-    if type(expected_obj) == pd.DataFrame:
-        assert set(received_obj.columns) == set(expected_obj.columns), \
-            'Incorrect columns for output {}\n' \
-            'COLUMNS:          {}\n' \
-            'EXPECTED COLUMNS: {}'.format(obj_name, sorted(received_obj.columns), sorted(expected_obj.columns))
-
-        # This is to catch a case where __equal__ says it's equal between different types
-        assert set([type(i) for i in received_obj.columns]) == set([type(i) for i in expected_obj.columns]), \
-            'Incorrect types in columns for output {}\n' \
-            'COLUMNS:          {}\n' \
-            'EXPECTED COLUMNS: {}'.format(obj_name, sorted(received_obj.columns), sorted(expected_obj.columns))
-
-        for column in expected_obj.columns:
-            assert received_obj[column].dtype == expected_obj[column].dtype, \
-                'Incorrect type for output {}, column {}\n' \
-                'Type:          {}\n' \
-                'EXPECTED Type: {}'.format(obj_name, column, received_obj[column].dtype, expected_obj[column].dtype)
-
-    if type(expected_obj) in {pd.DataFrame, pd.Series}:
-        assert set(received_obj.index) == set(expected_obj.index), \
-            'Incorrect indices for output {}\n' \
-            'INDICES:          {}\n' \
-            'EXPECTED INDICES: {}'.format(obj_name, sorted(received_obj.index), sorted(expected_obj.index))
-
-        # This is to catch a case where __equal__ says it's equal between different types
-        assert set([type(i) for i in received_obj.index]) == set([type(i) for i in expected_obj.index]), \
-            'Incorrect types in indices for output {}\n' \
-            'INDICES:          {}\n' \
-            'EXPECTED INDICES: {}'.format(obj_name, sorted(received_obj.index), sorted(expected_obj.index))
+    def test_empty_list(self):
+        assert lemmatize_words([]) == []
 
 
-def does_data_match(obj_a, obj_b):
-    if type(obj_a) == pd.DataFrame:
-        # Sort Columns
-        obj_b = obj_b.sort_index(1)
-        obj_a = obj_a.sort_index(1)
-
-    if type(obj_a) in {pd.DataFrame, pd.Series}:
-        # Sort Indices
-        obj_b = obj_b.sort_index()
-        obj_a = obj_a.sort_index()
-    try:
-        data_is_close = np.isclose(obj_b, obj_a, equal_nan=True)
-    except TypeError:
-        data_is_close = obj_b == obj_a
-    else:
-        if isinstance(obj_a, collections.Iterable):
-            data_is_close = data_is_close.all()
-
-    return data_is_close
+class TestRemoveStopwords:
+    def test_removes_common_stopwords(self):
+        words = ["the", "cat", "be", "on", "mat"]
+        result = remove_stopwords(words)
+        assert "cat" in result
+        assert "mat" in result
+        # "the" and "be" (lemmatized "is/are") should be removed
+        assert "the" not in result
 
 
-def assert_output(fn, fn_inputs, fn_expected_outputs, check_parameter_changes=True):
-    assert type(fn_expected_outputs) == OrderedDict
+# ---------------------------------------------------------------------------
+# sentiment tests
+# ---------------------------------------------------------------------------
 
-    if check_parameter_changes:
-        fn_inputs_passed_in = copy.deepcopy(fn_inputs)
-    else:
-        fn_inputs_passed_in = fn_inputs
+class TestGetBagOfWords:
+    def test_correct_shape(self):
+        vocab = pd.Series(["good", "bad", "risk"])
+        docs = ["good good risk", "bad bad bad"]
+        result = get_bag_of_words(vocab, docs)
+        assert result.shape == (2, 3)
 
-    fn_raw_out = fn(**fn_inputs_passed_in)
+    def test_nonnegative_values(self):
+        vocab = pd.Series(["profit", "loss"])
+        docs = ["profit profit", "loss"]
+        result = get_bag_of_words(vocab, docs)
+        assert (result >= 0).all()
 
-    # Check if inputs have changed
-    if check_parameter_changes:
-        for input_name, input_value in fn_inputs.items():
-            passed_in_unchanged = _is_equal(input_value, fn_inputs_passed_in[input_name])
+    def test_correct_counts(self):
+        vocab = pd.Series(["alpha", "beta"])
+        docs = ["alpha alpha beta"]
+        result = get_bag_of_words(vocab, docs)
+        assert result[0, 0] == 2  # alpha
+        assert result[0, 1] == 1  # beta
 
-            assert passed_in_unchanged, 'Input parameter "{}" has been modified inside the function. ' \
-                                        'The function shouldn\'t modify the function parameters.'.format(input_name)
 
-    fn_outputs = OrderedDict()
-    if len(fn_expected_outputs) == 1:
-        fn_outputs[list(fn_expected_outputs)[0]] = fn_raw_out
-    elif len(fn_expected_outputs) > 1:
-        assert type(fn_raw_out) == tuple,\
-            'Expecting function to return tuple, got type {}'.format(type(fn_raw_out))
-        assert len(fn_raw_out) == len(fn_expected_outputs),\
-            'Expected {} outputs in tuple, only found {} outputs'.format(len(fn_expected_outputs), len(fn_raw_out))
-        for key_i, output_key in enumerate(fn_expected_outputs.keys()):
-            fn_outputs[output_key] = fn_raw_out[key_i]
+class TestGetTfidf:
+    def test_correct_shape(self):
+        vocab = pd.Series(["profit", "loss", "risk"])
+        docs = ["profit loss risk", "profit profit"]
+        result = get_tfidf(vocab, docs)
+        assert result.shape == (2, 3)
 
-    err_message = _generate_output_error_msg(
-        fn.__name__,
-        fn_inputs,
-        fn_outputs,
-        fn_expected_outputs)
+    def test_values_in_range(self):
+        vocab = pd.Series(["up", "down"])
+        docs = ["up up down", "down down"]
+        result = get_tfidf(vocab, docs)
+        assert (result >= 0).all()
+        assert (result <= 1).all()
 
-    for fn_out, (out_name, expected_out) in zip(fn_outputs.values(), fn_expected_outputs.items()):
-        assert_structure(fn_out, expected_out, out_name)
-        correct_data = does_data_match(expected_out, fn_out)
 
-        assert correct_data, err_message
+# ---------------------------------------------------------------------------
+# similarity tests
+# ---------------------------------------------------------------------------
+
+class TestJaccardSimilarity:
+    def test_correct_length(self):
+        matrix = np.array([[1, 0, 1], [1, 1, 0], [0, 1, 1]])
+        result = compute_jaccard_similarity(matrix)
+        assert len(result) == 2
+
+    def test_values_in_range(self):
+        matrix = np.array([[1, 0, 1, 0], [1, 1, 0, 0], [0, 1, 1, 1]])
+        result = compute_jaccard_similarity(matrix)
+        assert all(0 <= v <= 1 for v in result)
+
+    def test_identical_vectors(self):
+        matrix = np.array([[1, 1, 1], [1, 1, 1]])
+        result = compute_jaccard_similarity(matrix)
+        assert result[0] == pytest.approx(1.0)
+
+    def test_disjoint_vectors(self):
+        matrix = np.array([[1, 0, 0], [0, 0, 1]])
+        result = compute_jaccard_similarity(matrix)
+        assert result[0] == pytest.approx(0.0)
+
+
+class TestCosineSimilarity:
+    def test_correct_length(self):
+        matrix = np.array([[0.5, 0.3], [0.2, 0.8], [0.1, 0.9]])
+        result = compute_cosine_similarity(matrix)
+        assert len(result) == 2
+
+    def test_values_in_range(self):
+        matrix = np.array([[0.5, 0.3, 0.1], [0.2, 0.8, 0.4]])
+        result = compute_cosine_similarity(matrix)
+        assert all(0 <= v <= 1 for v in result)
+
+    def test_identical_vectors(self):
+        matrix = np.array([[1.0, 2.0, 3.0], [1.0, 2.0, 3.0]])
+        result = compute_cosine_similarity(matrix)
+        assert result[0] == pytest.approx(1.0)
+
+
+# ---------------------------------------------------------------------------
+# factor_evaluation tests
+# ---------------------------------------------------------------------------
+
+class TestSharpeRatio:
+    def test_returns_float(self):
+        returns = pd.Series([0.01, -0.005, 0.02, 0.015, -0.01])
+        result = compute_sharpe_ratio(returns)
+        assert isinstance(result, float)
+
+    def test_positive_for_positive_mean(self):
+        returns = pd.Series([0.01, 0.02, 0.03, 0.01, 0.02])
+        assert compute_sharpe_ratio(returns) > 0
+
+    def test_negative_for_negative_mean(self):
+        returns = pd.Series([-0.01, -0.02, -0.03, -0.01, -0.02])
+        assert compute_sharpe_ratio(returns) < 0
+
+    def test_zero_for_empty_series(self):
+        assert compute_sharpe_ratio(pd.Series(dtype=float)) == 0.0
+
+    def test_zero_for_constant_returns(self):
+        returns = pd.Series([0.01, 0.01, 0.01])
+        assert compute_sharpe_ratio(returns) == 0.0
+
+    def test_annualization_factor(self):
+        returns = pd.Series([0.01, 0.02, 0.03])
+        sharpe_daily = compute_sharpe_ratio(returns, annualization_factor=np.sqrt(252))
+        sharpe_yearly = compute_sharpe_ratio(returns, annualization_factor=1.0)
+        assert sharpe_daily > sharpe_yearly
